@@ -40,9 +40,10 @@ if os.environ.get("GEMINI_API_KEY"):
 else:
     try:
         import google.auth
+
         _, project_id = google.auth.default()
         os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
-        os.environ["GOOGLE_CLOUD_LOCATION"] = "us-central1"
+        os.environ["GOOGLE_CLOUD_LOCATION"] = "asia-southeast1"
         os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
     except Exception:
         pass
@@ -52,16 +53,47 @@ else:
 IN_MEMORY_STORE = {}
 
 
+def safe_delete_state_key(state: Any, key: str) -> Any:
+    """Safely pops a key from a dictionary or ADK State object."""
+    if hasattr(state, "_value") and hasattr(state, "_delta"):
+        val = state._value.pop(key, None)
+        state._delta.pop(key, None)
+        return val
+    elif isinstance(state, dict):
+        return state.pop(key, None)
+    else:
+        try:
+            return state.pop(key, None)
+        except Exception:
+            val = state.get(key)
+            try:
+                state[key] = None
+            except Exception:
+                pass
+            return val
+
+
 class DocumentDetails(BaseModel):
-    doc_type: str = Field(description="The type of document, e.g., Passport, Driving Licence, Insurance, Warranty.")
+    doc_type: str = Field(
+        description="The type of document, e.g., Passport, Driving Licence, Insurance, Warranty."
+    )
     owner_name: str = Field(description="The full name of the owner of the document.")
-    expiry_date: str = Field(description="The expiration or renewal date of the document in YYYY-MM-DD format.")
-    reference_number: str = Field(description="The document's reference number or serial ID.")
-    confidence_score: float = Field(description="A confidence score between 0.0 and 1.0 indicating your certainty about the extracted details.")
-    uncertainties: list[str] = Field(description="A list of specific details or fields that were unclear, blurry, missing, or uncertain.")
+    expiry_date: str = Field(
+        description="The expiration or renewal date of the document in YYYY-MM-DD format."
+    )
+    reference_number: str = Field(
+        description="The document's reference number or serial ID."
+    )
+    confidence_score: float = Field(
+        description="A confidence score between 0.0 and 1.0 indicating your certainty about the extracted details."
+    )
+    uncertainties: list[str] = Field(
+        description="A list of specific details or fields that were unclear, blurry, missing, or uncertain."
+    )
 
 
 # --- Helper Functions for Security Checkpoint ---
+
 
 async def ocr_document(file_bytes: bytes, mime_type: str) -> str:
     """Calls Gemini to perform verbatim text extraction / OCR on the document."""
@@ -70,8 +102,8 @@ async def ocr_document(file_bytes: bytes, mime_type: str) -> str:
         model=GEMINI_MODEL_NAME,
         contents=[
             types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
-            "Extract and return all the raw text from the document verbatim. Do not interpret, reformat, or modify anything."
-        ]
+            "Extract and return all the raw text from the document verbatim. Do not interpret, reformat, or modify anything.",
+        ],
     )
     return response.text or ""
 
@@ -87,7 +119,7 @@ def detect_prompt_injection(text: str) -> bool:
         "bypass the confidence gate",
         "force an auto-persist",
         "override confidence",
-        "bypass the gate"
+        "bypass the gate",
     ]
     for pattern in injection_patterns:
         if pattern in normalized:
@@ -123,43 +155,92 @@ def scrub_pii(text: str) -> tuple[str, list[str]]:
 
 # --- Workflow Graph Nodes ---
 
+
 @node
 async def security_checkpoint_node(ctx, node_input: Any) -> Any:
     """First-gate node to OCR the document, redact PII, and block prompt injections."""
-    # Normalize input
+    file_bytes = None
+    mime_type = None
+
+    def extract_from_part(part) -> tuple[bytes | None, str | None]:
+        if hasattr(part, "inline_data") and part.inline_data and part.inline_data.data:
+            return part.inline_data.data, part.inline_data.mime_type
+        if hasattr(part, "file_data") and part.file_data and part.file_data.file_uri:
+            try:
+                client = Client()
+                data = client.files.download(file=part.file_data.file_uri)
+                return data, part.file_data.mime_type
+            except Exception:
+                pass
+        return None, None
+
+    # 1. Normalize and extract file bytes and mime type from various input formats
     if isinstance(node_input, dict):
-        data = node_input
-    else:
-        if isinstance(node_input, types.Content):
-            text_input = "".join(part.text for part in node_input.parts if part.text is not None)
-        elif isinstance(node_input, str):
-            text_input = node_input
-        else:
-            text_input = str(node_input)
+        base64_file = node_input.get("base64_file", "")
+        mime_type = node_input.get("mime_type", "application/pdf")
+        if base64_file:
+            try:
+                file_bytes = base64.b64decode(base64_file)
+            except Exception as e:
+                yield f"Error: Failed to decode base64 file content. Details: {e}"
+                return
+    elif isinstance(node_input, types.Content):
+        # Scan parts for inline_data/file_data
+        for part in node_input.parts:
+            fb, mt = extract_from_part(part)
+            if fb:
+                file_bytes = fb
+                mime_type = mt
+                break
 
+        # If no file found in parts, check if the text parts contain a JSON payload
+        if not file_bytes:
+            text_input = "".join(
+                part.text for part in node_input.parts if part.text is not None
+            )
+            try:
+                data = json.loads(text_input)
+                base64_file = data.get("base64_file", "")
+                mime_type = data.get("mime_type", "application/pdf")
+                if base64_file:
+                    file_bytes = base64.b64decode(base64_file)
+            except Exception:
+                pass
+    elif isinstance(node_input, types.Part):
+        file_bytes, mime_type = extract_from_part(node_input)
+    elif isinstance(node_input, list):
+        for item in node_input:
+            fb, mt = extract_from_part(item)
+            if fb:
+                file_bytes = fb
+                mime_type = mt
+                break
+    elif isinstance(node_input, str):
         try:
-            data = json.loads(text_input)
+            data = json.loads(node_input)
+            base64_file = data.get("base64_file", "")
+            mime_type = data.get("mime_type", "application/pdf")
+            if base64_file:
+                file_bytes = base64.b64decode(base64_file)
         except Exception:
-            yield "Error: Input must be a valid JSON string or dictionary containing 'base64_file' and 'mime_type'."
-            return
+            # Fallback: try decoding directly as base64 string
+            try:
+                file_bytes = base64.b64decode(node_input)
+                mime_type = "application/pdf"
+            except Exception:
+                pass
 
-    base64_file = data.get("base64_file", "")
-    mime_type = data.get("mime_type", "application/pdf")
-
-    if not base64_file:
-        yield "Error: Missing 'base64_file' key in input."
+    if not file_bytes:
+        yield "Error: Input must contain a file (upload, dictionary with 'base64_file', or valid JSON)."
         return
 
-    doc_hash = hashlib.sha256(base64_file.encode("utf-8")).hexdigest()[:16]
+    if not mime_type:
+        mime_type = "application/pdf"
+
+    doc_hash = hashlib.sha256(file_bytes).hexdigest()[:16]
 
     if doc_hash in IN_MEMORY_STORE:
         yield f"Document already exists in the renewal store (hash: {doc_hash})."
-        return
-
-    try:
-        file_bytes = base64.b64decode(base64_file)
-    except Exception as e:
-        yield f"Error: Failed to decode base64 file content. Details: {e}"
         return
 
     # 1. OCR text extraction
@@ -171,10 +252,7 @@ async def security_checkpoint_node(ctx, node_input: Any) -> Any:
 
     # 2. Defend against Prompt Injection
     if detect_prompt_injection(raw_text):
-        ctx.state["security_event"] = {
-            "doc_hash": doc_hash,
-            "raw_text": raw_text
-        }
+        ctx.state["security_event"] = {"doc_hash": doc_hash, "raw_text": raw_text}
         ctx.route = "security_flagged"
         yield f"[SECURITY WARNING] Potential prompt injection detected in document (hash: {doc_hash}). Routing to security review."
         return
@@ -207,29 +285,43 @@ async def security_review_node(ctx, node_input: Any) -> Any:
         )
         return
 
+    # Resolve user's response from resume_inputs if available, otherwise node_input
+    resume_inputs = getattr(ctx, "resume_inputs", None)
+    user_response = list(resume_inputs.values())[0] if resume_inputs else node_input
+
     # Parse resume decision
-    if isinstance(node_input, types.Content):
-        decision_str = "".join(part.text for part in node_input.parts if part.text is not None)
+    if isinstance(user_response, types.Content):
+        decision_str = "".join(
+            part.text for part in user_response.parts if part.text is not None
+        )
     else:
-        decision_str = str(node_input)
+        decision_str = str(user_response)
     decision = decision_str.strip().lower()
 
-    del ctx.state["awaiting_security_decision"]
-    event = ctx.state.pop("security_event", None)
+    # Log debug info
+    try:
+        with open("debug_adk.log", "a") as f:
+            f.write(f"--- security_review_node ---\n")
+            f.write(f"node_input: {node_input!r}\n")
+            f.write(f"ctx.resume_inputs: {ctx.resume_inputs!r}\n")
+            f.write(f"user_response: {user_response!r}\n")
+            f.write(f"decision: {decision!r}\n")
+    except Exception:
+        pass
+
+    safe_delete_state_key(ctx.state, "awaiting_security_decision")
+    event = safe_delete_state_key(ctx.state, "security_event")
     doc_hash = event.get("doc_hash", "unknown") if event else "unknown"
 
     if decision in ("confirm", "force", "yes", "y"):
         IN_MEMORY_STORE[doc_hash] = {
             "security_event": True,
             "status": "FORCE_PERSISTED",
-            "raw_text": event.get("raw_text", "") if event else ""
+            "raw_text": event.get("raw_text", "") if event else "",
         }
         yield f"Security Action: Document (hash: {doc_hash}) has been FORCE PERSISTED by administrator."
     else:
-        IN_MEMORY_STORE[doc_hash] = {
-            "security_event": True,
-            "status": "DISCARDED"
-        }
+        IN_MEMORY_STORE[doc_hash] = {"security_event": True, "status": "DISCARDED"}
         yield f"Security Action: Document (hash: {doc_hash}) has been DISCARDED."
 
 
@@ -257,9 +349,8 @@ async def extract_node(ctx, node_input: Any) -> Any:
             model=GEMINI_MODEL_NAME,
             contents=prompt,
             config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=DocumentDetails
-            )
+                response_mime_type="application/json", response_schema=DocumentDetails
+            ),
         )
         details: DocumentDetails = response.parsed
     except Exception as e:
@@ -288,8 +379,7 @@ async def extract_node(ctx, node_input: Any) -> Any:
         )
         try:
             summary_response = client.models.generate_content(
-                model=GEMINI_MODEL_NAME,
-                contents=summary_prompt
+                model=GEMINI_MODEL_NAME, contents=summary_prompt
             )
             summary_text = summary_response.text.strip()
         except Exception as e:
@@ -300,7 +390,7 @@ async def extract_node(ctx, node_input: Any) -> Any:
             "doc_hash": doc_hash,
             "details": details.model_dump(),
             "summary": summary_text,
-            "redacted_categories": redacted_categories
+            "redacted_categories": redacted_categories,
         }
         ctx.route = "requires_confirmation"
         yield f"Extraction confidence is low ({details.confidence_score:.2f}). Forwarding for review."
@@ -323,16 +413,33 @@ async def confirmation_node(ctx, node_input: Any) -> Any:
         )
         return
 
+    # Resolve user's response from resume_inputs if available, otherwise node_input
+    resume_inputs = getattr(ctx, "resume_inputs", None)
+    user_response = list(resume_inputs.values())[0] if resume_inputs else node_input
+
     # Process response
-    if isinstance(node_input, types.Content):
-        decision_str = "".join(part.text for part in node_input.parts if part.text is not None)
+    if isinstance(user_response, types.Content):
+        decision_str = "".join(
+            part.text for part in user_response.parts if part.text is not None
+        )
     else:
-        decision_str = str(node_input)
+        decision_str = str(user_response)
     decision = decision_str.strip().lower()
 
+    # Log debug info
+    try:
+        with open("debug_adk.log", "a") as f:
+            f.write(f"--- confirmation_node ---\n")
+            f.write(f"node_input: {node_input!r}\n")
+            f.write(f"ctx.resume_inputs: {ctx.resume_inputs!r}\n")
+            f.write(f"user_response: {user_response!r}\n")
+            f.write(f"decision: {decision!r}\n")
+    except Exception:
+        pass
+
     # Clean up state flags
-    del ctx.state["awaiting_decision"]
-    pending = ctx.state.pop("pending_document", None)
+    safe_delete_state_key(ctx.state, "awaiting_decision")
+    pending = safe_delete_state_key(ctx.state, "pending_document")
 
     if not pending:
         yield "Error: No pending document was found in session state."
@@ -356,14 +463,12 @@ workflow = Workflow(
     name="lifekeeper_workflow",
     edges=[
         (START, security_checkpoint_node),
-        (security_checkpoint_node, {
-            "security_flagged": security_review_node,
-            "clean": extract_node
-        }),
-        (extract_node, {
-            "requires_confirmation": confirmation_node
-        })
-    ]
+        (
+            security_checkpoint_node,
+            {"security_flagged": security_review_node, "clean": extract_node},
+        ),
+        (extract_node, {"requires_confirmation": confirmation_node}),
+    ],
 )
 
 root_agent = workflow

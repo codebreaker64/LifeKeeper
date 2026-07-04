@@ -42,7 +42,7 @@ def test_agent_stream(mock_client_class) -> None:
         expiry_date="2031-10-10",
         reference_number="PS123456",
         confidence_score=0.95,
-        uncertainties=[]
+        uncertainties=[],
     )
 
     mock_client.models.generate_content.side_effect = [ocr_response, extract_response]
@@ -55,7 +55,7 @@ def test_agent_stream(mock_client_class) -> None:
 
     input_data = {
         "base64_file": base64.b64encode(b"passport content").decode("utf-8"),
-        "mime_type": "application/pdf"
+        "mime_type": "application/pdf",
     }
 
     message = types.Content(

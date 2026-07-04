@@ -38,6 +38,9 @@ class MockContext:
 def reset_stores():
     """Resets the global store before each test run."""
     IN_MEMORY_STORE.clear()
+    import app.agent
+
+    app.agent.CONFIDENCE_THRESHOLD = 0.7
 
 
 @pytest.mark.asyncio
@@ -56,10 +59,7 @@ async def test_security_checkpoint_clean_with_pii(mock_ocr):
 
     ctx = MockContext()
     dummy_b64 = base64.b64encode(b"document data").decode("utf-8")
-    node_input = {
-        "base64_file": dummy_b64,
-        "mime_type": "application/pdf"
-    }
+    node_input = {"base64_file": dummy_b64, "mime_type": "application/pdf"}
 
     # Call underlying function to avoid 'FunctionNode not callable' error
     results = []
@@ -94,10 +94,7 @@ async def test_security_checkpoint_prompt_injection(mock_ocr):
 
     ctx = MockContext()
     dummy_b64 = base64.b64encode(b"injection doc").decode("utf-8")
-    node_input = {
-        "base64_file": dummy_b64,
-        "mime_type": "image/png"
-    }
+    node_input = {"base64_file": dummy_b64, "mime_type": "image/png"}
 
     results = []
     async for item in security_checkpoint_node._func(ctx, node_input):
@@ -116,7 +113,7 @@ async def test_security_review_flow_confirm():
     ctx = MockContext()
     ctx.state["security_event"] = {
         "doc_hash": "flagged_hash_789",
-        "raw_text": "Dangerous prompt injection text"
+        "raw_text": "Dangerous prompt injection text",
     }
 
     # Turn 1: yields RequestInput
@@ -151,7 +148,7 @@ async def test_extract_node_high_confidence(mock_client_class):
         expiry_date="2031-10-10",
         reference_number="PS123456",
         confidence_score=0.95,
-        uncertainties=[]
+        uncertainties=[],
     )
     mock_client.models.generate_content.return_value = mock_response
     mock_client_class.return_value = mock_client
@@ -186,12 +183,15 @@ async def test_extract_node_low_confidence(mock_client_class):
         expiry_date="2027-01-01",
         reference_number="INS7788",
         confidence_score=0.5,
-        uncertainties=["Signature blurry"]
+        uncertainties=["Signature blurry"],
     )
     mock_response_summary = MagicMock()
     mock_response_summary.text = "Low confidence Insurance doc for Bob Jones."
 
-    mock_client.models.generate_content.side_effect = [mock_response_extract, mock_response_summary]
+    mock_client.models.generate_content.side_effect = [
+        mock_response_extract,
+        mock_response_summary,
+    ]
     mock_client_class.return_value = mock_client
 
     ctx = MockContext()
@@ -223,7 +223,7 @@ async def test_confirmation_node_confirm():
             "reference_number": "W123",
         },
         "summary": "Warranty details.",
-        "redacted_categories": ["SSN"]
+        "redacted_categories": ["SSN"],
     }
 
     # Turn 1
@@ -241,3 +241,36 @@ async def test_confirmation_node_confirm():
     assert "pending_hash" in IN_MEMORY_STORE
     assert IN_MEMORY_STORE["pending_hash"]["owner_name"] == "Charlie"
     assert "SSN" in IN_MEMORY_STORE["pending_hash"]["redacted_categories"]
+
+
+@pytest.mark.asyncio
+@patch("app.agent.ocr_document")
+async def test_security_checkpoint_direct_file(mock_ocr):
+    """Verify that security_checkpoint_node accepts types.Content with inline_data file."""
+    from google.genai import types
+
+    mock_ocr.return_value = "Passport details\nOwner: Test User\nExpiry: 2035-12-31"
+
+    ctx = MockContext()
+    # Create types.Content containing types.Part with inline_data
+    node_input = types.Content(
+        parts=[
+            types.Part(
+                inline_data=types.Blob(
+                    data=b"my-dummy-image-data", mime_type="image/png"
+                )
+            )
+        ]
+    )
+
+    results = []
+    async for item in security_checkpoint_node._func(ctx, node_input):
+        results.append(item)
+
+    assert len(results) == 1
+    assert "Proceeding to extraction" in results[0]
+    assert ctx.route == "clean"
+    assert (
+        ctx.state["scrubbed_text"]
+        == "Passport details\nOwner: Test User\nExpiry: 2035-12-31"
+    )

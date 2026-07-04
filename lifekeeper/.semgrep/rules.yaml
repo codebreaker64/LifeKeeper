@@ -1,0 +1,10 @@
+rules:
+  - id: detect-google-api-key
+    pattern-regex: 'AIzaSy[A-Za-z0-9_\-]*'
+    message: "Detected a potential hardcoded Google API Key. Never commit API keys or credentials directly to source files. Use environment variables or a secret management service instead."
+    languages:
+      - python
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: "CWE-798: Use of Hard-coded Credentials"

@@ -1,0 +1,33 @@
+# Virtual environments
+.venv/
+.venv*/
+env/
+venv/
+ENV/
+
+# Environment files / secrets
+.env
+.env.*
+
+# Python byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*.pyc
+*$py.class
+.pytest_cache/
+.cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# OS-specific files
+.DS_Store
+Thumbs.db

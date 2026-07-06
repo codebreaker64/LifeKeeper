@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+httpx
+pydantic
+pydantic-settings
+google-cloud-firestore
+google-cloud-documentai
+google-cloud-storage
+google-cloud-secret-manager
+google-genai
+reportlab

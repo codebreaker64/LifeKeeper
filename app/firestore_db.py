@@ -58,6 +58,9 @@ def get_or_create_user(telegram_chat_id: str) -> dict[str, Any]:
         "notify_channels": ["telegram"],   # email/SMS are post-MVP stretch
         "contact_email": None,
         "contact_phone": None,
+        # Default issuing country for playbook lookups — learned from the
+        # first document (or the user's answer), asked at most once.
+        "default_country": None,
         "onboarded_at": now_utc(),
     }
     db().collection("users").document(user_id).set(record)
@@ -67,6 +70,10 @@ def get_or_create_user(telegram_chat_id: str) -> dict[str, Any]:
 def get_user(user_id: str) -> Optional[dict[str, Any]]:
     snap = db().collection("users").document(user_id).get()
     return {"user_id": snap.id, **snap.to_dict()} if snap.exists else None
+
+
+def update_user(user_id: str, fields: dict[str, Any]) -> None:
+    db().collection("users").document(user_id).update(fields)
 
 
 # ----------------------------------------------------------- documents ----
@@ -83,6 +90,7 @@ def write_document_record(record: dict[str, Any]) -> str:
     record.setdefault("owner_name", None)
     record.setdefault("reference_number", None)
     record.setdefault("issuer", None)
+    record.setdefault("issuing_country", None)
     record.setdefault("template_matched", False)
     record.setdefault("source_file_ref", None)
     record.setdefault("last_notified_tier", None)
@@ -150,3 +158,21 @@ def get_renewal_action(action_id: str) -> Optional[dict[str, Any]]:
 
 def update_renewal_action(action_id: str, fields: dict[str, Any]) -> None:
     db().collection("renewal_actions").document(action_id).update(fields)
+
+
+def transition_renewal_action(action_id: str, fields: dict[str, Any]) -> bool:
+    """Atomically move an action out of 'drafted' — the HITL gate resolution.
+    A Firestore transaction makes the read-check-write race-free, so two
+    simultaneous Approve taps can never both succeed (double-tap safe)."""
+    ref = db().collection("renewal_actions").document(action_id)
+    transaction = db().transaction()
+
+    @firestore.transactional
+    def _txn(txn: firestore.Transaction) -> bool:
+        snap = ref.get(transaction=txn)
+        if not snap.exists or snap.to_dict().get("status") != "drafted":
+            return False
+        txn.update(ref, fields)
+        return True
+
+    return _txn(transaction)

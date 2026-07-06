@@ -17,6 +17,7 @@ Skills implemented:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -30,15 +31,16 @@ log = logging.getLogger("lifekeeper.scheduler")
 TIER_ORDER = [None, "early_warning", "final_reminder", "overdue"]
 
 TIER_MESSAGES = {
-    "early_warning": "⏰ *Early warning* — your {doc_type} ({ref}) expires on "
-                     "{expiry}. That's in {days} days. Reply "
-                     "*generate my renewal packet* when you're ready.",
-    "final_reminder": "🚨 *Final reminder* — your {doc_type} ({ref}) expires on "
-                      "{expiry} — only {days} days left! Reply "
-                      "*generate my renewal packet* to get started now.",
-    "overdue": "❗ *Overdue* — your {doc_type} ({ref}) expired on {expiry}. "
-               "Reply *generate my renewal packet* and I'll prepare "
-               "everything you need to fix this.",
+    "early_warning": "⏰ Heads up! Your {doc_type} ({ref}) expires on {expiry}. "
+                     "That's {days} days away, so now is a relaxed time to "
+                     "start the renewal. Send /packet when you're ready and "
+                     "I'll prepare everything.",
+    "final_reminder": "🚨 Time to act: your {doc_type} ({ref}) expires on "
+                      "{expiry}. Only {days} days left. Send /packet and "
+                      "I'll get you the checklist and official link.",
+    "overdue": "❗ Your {doc_type} ({ref}) expired on {expiry}. Don't worry, "
+               "it's fixable. Send /packet and I'll walk you through the "
+               "renewal.",
 }
 
 
@@ -79,7 +81,7 @@ def _advance_next_check_at(record: dict[str, Any], current_tier: Optional[str]) 
 async def notify(record: dict[str, Any], tier: str) -> None:
     """Skill `notify` — channel-agnostic by design (§4.3). MVP ships
     Telegram; SendGrid/Twilio can be added here without touching the loop."""
-    user = db.get_user(record["user_id"])
+    user = await asyncio.to_thread(db.get_user, record["user_id"])
     if not user or not user.get("telegram_chat_id"):
         log.warning("No telegram_chat_id for user %s — queueing skipped", record["user_id"])
         return
@@ -90,7 +92,12 @@ async def notify(record: dict[str, Any], tier: str) -> None:
         expiry=record["expiry_date"].strftime("%d %b %Y"),
         days=days,
     )
-    await tg.send_message(user["telegram_chat_id"], text)
+    # Lifecycle buttons ride on every reminder: the user can resolve the
+    # document (renewed/stop) or snooze it without typing anything.
+    await tg.send_message(
+        user["telegram_chat_id"], text,
+        reply_markup=tg.lifecycle_keyboard(record["doc_id"]),
+    )
 
 
 async def run_scheduler_pass() -> dict[str, int]:
@@ -98,19 +105,44 @@ async def run_scheduler_pass() -> dict[str, int]:
     second pass notifies nobody (tier-crossing invariant). Returns counters
     for logging/demo output."""
     checked = notified = 0
-    for record in db.query_due_records():
+    for record in await asyncio.to_thread(db.query_due_records):
         checked += 1
-        tier = compute_tier(record["expiry_date"], record["doc_type"])
-        if tier and check_tier_crossing(record, tier):
-            await notify(record, tier)
-            db.update_document(record["doc_id"], {"last_notified_tier": tier})
-            notified += 1
-        db.update_document(
-            record["doc_id"],
-            {"next_check_at": _advance_next_check_at(record, tier)},
-        )
+        # One bad record (Telegram hiccup, malformed doc) must never abort
+        # the whole pass — the remaining due records still get checked.
+        try:
+            tier = compute_tier(record["expiry_date"], record["doc_type"])
+            if tier and check_tier_crossing(record, tier):
+                await notify(record, tier)
+                await asyncio.to_thread(
+                    db.update_document, record["doc_id"], {"last_notified_tier": tier}
+                )
+                notified += 1
+            await asyncio.to_thread(
+                db.update_document,
+                record["doc_id"],
+                {"next_check_at": _advance_next_check_at(record, tier)},
+            )
+        except Exception:
+            log.exception("Scheduler failed on doc %s — continuing", record["doc_id"])
     log.info("Scheduler pass: checked=%d notified=%d", checked, notified)
     return {"checked": checked, "notified": notified}
+
+
+def snooze_document(doc_id: str, days: int = 7) -> bool:
+    """Lifecycle button 'remind me in a week': re-arm the current tier's
+    reminder `days` from now. Rolling `last_notified_tier` back one step
+    means the same reminder is allowed to fire again — a snooze, not a
+    dismissal."""
+    record = db.get_document(doc_id)
+    if not record:
+        return False
+    tier = compute_tier(record["expiry_date"], record["doc_type"])
+    previous = TIER_ORDER[max(TIER_ORDER.index(tier) - 1, 0)]
+    db.update_document(doc_id, {
+        "last_notified_tier": previous,
+        "next_check_at": datetime.now(timezone.utc) + timedelta(days=days),
+    })
+    return True
 
 
 async def handle_query(user_id: str, message: str) -> str:
@@ -118,19 +150,19 @@ async def handle_query(user_id: str, message: str) -> str:
     questions like 'what expires in 3 months?' from Firestore memory.
     A deliberate non-LLM implementation: list everything, soonest first —
     correct, instant, and zero hallucination risk for the demo."""
-    docs = db.list_user_documents(user_id)
+    docs = await asyncio.to_thread(db.list_user_documents, user_id)
     if not docs:
-        return ("You haven't saved any documents yet. Send me a photo or PDF "
-                "of a passport, licence, insurance policy, warranty, or "
-                "membership card to get started!")
+        return ("You haven't given me anything to watch yet! Send a photo or "
+                "PDF of a passport, licence, insurance policy, warranty, or "
+                "membership card and I'll take it from there.")
     docs.sort(key=lambda d: d["expiry_date"])
-    lines = ["📋 *Your tracked documents:*"]
+    lines = ["📋 *Here's what I'm keeping an eye on:*"]
     for d in docs:
         days = (d["expiry_date"] - datetime.now(timezone.utc)).days
-        status = f"expires in {days} days" if days >= 0 else f"expired {-days} days ago ❗"
+        status = f"{days} days left" if days >= 0 else f"expired {-days} days ago ❗"
         lines.append(
-            f"• *{d['doc_type'].title()}* ({d.get('reference_number') or 'no ref'}) — "
-            f"{d['expiry_date'].strftime('%d %b %Y')} ({status})"
+            f"• *{d['doc_type'].title()}* ({d.get('reference_number') or 'no ref'}), "
+            f"expires {d['expiry_date'].strftime('%d %b %Y')} ({status})"
         )
-    lines.append("\nReply *generate my renewal packet* to act on the most urgent one.")
+    lines.append("\nSend /packet whenever you want to start a renewal.")
     return "\n".join(lines)

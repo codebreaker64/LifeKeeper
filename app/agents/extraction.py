@@ -26,7 +26,24 @@ from ..config import get_settings
 
 log = logging.getLogger("lifekeeper.extraction")
 
+
+class ExtractionError(Exception):
+    """OCR text yielded no usable expiry date. Deliberately NOT a ValueError:
+    json.JSONDecodeError subclasses ValueError, and a Gemini output glitch
+    must not be reported to the user as 'no expiry date found'."""
+
+
 DOC_TYPES = ["passport", "licence", "insurance", "warranty", "membership", "other"]
+
+# Doc types where an issuing *country* is a meaningful concept and drives the
+# renewal playbook (a passport is renewed with the issuing government). For
+# insurance/warranty/membership the issuer — not a country — is what matters,
+# so we never ask for or store a country on those.
+COUNTRY_RELEVANT_TYPES = frozenset({"passport", "licence"})
+
+
+def country_is_relevant(doc_type: str) -> bool:
+    return doc_type in COUNTRY_RELEVANT_TYPES
 
 # Urgency windows in days before expiry (Design Doc §4.2 table).
 # Tiers: early_warning → final_reminder → overdue (on expiry).
@@ -54,6 +71,13 @@ _EXTRACTION_SCHEMA = {
             "description": "Passport no., policy no., licence no., etc.",
         },
         "issuer": {"type": "string", "description": "e.g. HMPO, DVLA, Aviva"},
+        "issuing_country": {
+            "type": "string",
+            "description": "Country that ISSUED the document, as an ISO "
+                           "3166-1 alpha-2 code (SG, GB, US, MY...). Infer "
+                           "from the issuer, country field, MRZ, or language. "
+                           "Omit if genuinely unclear.",
+        },
     },
     "required": ["doc_type"],
 }
@@ -66,6 +90,9 @@ Rules:
 - If both issue and expiry dates appear, expiry is the LATER one, usually labelled
   "Date of expiry", "Valid until", "Expires", "Renewal date".
 - If genuinely no expiry date exists, return null for expiry_date.
+- issuing_country is the country that issued the document (two-letter ISO
+  code). A UK passport is GB; an ICA-issued document is SG. Renewal happens
+  with the issuing country regardless of where the owner lives.
 - Do not invent values. Omit fields you cannot find.
 
 OCR TEXT:
@@ -73,9 +100,50 @@ OCR TEXT:
 {text}
 ---"""
 
+# Country names/codes we can map to ISO 3166-1 alpha-2 without a lookup
+# service. Used for both model output and typed user answers ("Singapore").
+COUNTRY_ALIASES: dict[str, str] = {
+    "sg": "SG", "singapore": "SG",
+    "gb": "GB", "uk": "GB", "united kingdom": "GB", "britain": "GB",
+    "great britain": "GB", "england": "GB",
+    "us": "US", "usa": "US", "united states": "US", "america": "US",
+    "united states of america": "US",
+    "my": "MY", "malaysia": "MY",
+    "au": "AU", "australia": "AU",
+    "nz": "NZ", "new zealand": "NZ",
+    "in": "IN", "india": "IN",
+    "cn": "CN", "china": "CN",
+    "hk": "HK", "hong kong": "HK",
+    "id": "ID", "indonesia": "ID",
+    "ca": "CA", "canada": "CA",
+    "ie": "IE", "ireland": "IE",
+    "de": "DE", "germany": "DE",
+    "fr": "FR", "france": "FR",
+    "jp": "JP", "japan": "JP",
+    "kr": "KR", "south korea": "KR", "korea": "KR",
+    "ph": "PH", "philippines": "PH",
+    "th": "TH", "thailand": "TH",
+    "vn": "VN", "vietnam": "VN",
+}
+
+
+def normalize_country(raw: Optional[str]) -> Optional[str]:
+    """Best-effort country → ISO alpha-2 code. Unknown countries round-trip
+    as a cleaned name (they just won't match a renewal playbook URL)."""
+    if not raw:
+        return None
+    cleaned = raw.strip().strip(".").lower()
+    if not cleaned:
+        return None
+    if cleaned in COUNTRY_ALIASES:
+        return COUNTRY_ALIASES[cleaned]
+    if len(cleaned) == 2 and cleaned.isalpha():
+        return cleaned.upper()
+    return raw.strip().title()
+
 
 def extract_record(ocr_text: str) -> dict[str, Any]:
-    """One structured LLM call → validated dict. Raises ValueError on
+    """One structured LLM call → validated dict. Raises ExtractionError on
     unusable output so the caller can ask the user instead of guessing."""
     from google import genai
 
@@ -108,7 +176,7 @@ def extract_record(ocr_text: str) -> dict[str, Any]:
             log.warning("Model returned unparseable date: %r", raw["expiry_date"])
 
     if expiry is None:
-        raise ValueError("no_expiry_date")
+        raise ExtractionError("no_expiry_date")
 
     return {
         "doc_type": doc_type,
@@ -116,6 +184,7 @@ def extract_record(ocr_text: str) -> dict[str, Any]:
         "owner_name": raw.get("owner_name"),
         "reference_number": raw.get("reference_number"),
         "issuer": raw.get("issuer"),
+        "issuing_country": normalize_country(raw.get("issuing_country")),
     }
 
 

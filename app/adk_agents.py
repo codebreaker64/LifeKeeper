@@ -73,9 +73,10 @@ def compute_urgency_tier(doc_id: str) -> dict:
 
 
 def generate_packet(doc_id: str) -> dict:
-    """Generate a renewal packet (PDF + checklist + official URL) for a
-    document. The packet remains 'drafted' until human approval — this tool
-    NEVER submits anything to third-party portals."""
+    """Generate a renewal packet (checklist + official renewal URL for the
+    issuing country + .ics calendar file) for a document. This tool NEVER
+    submits anything to third-party portals — acting on the packet is
+    always the human's move."""
     return renewal_agent.generate_renewal_packet(doc_id)
 
 
@@ -98,14 +99,15 @@ reminder_scheduler_agent = Agent(
 renewal_action_agent = Agent(
     name="renewal_action_agent",
     model=MODEL,
-    description="Prepares renewal packets (PDF + checklist + official URL) "
-                "for expiring documents, gated by human approval.",
+    description="Prepares renewal packets (checklist + official URL + "
+                "calendar file) for expiring documents; the human always "
+                "performs the actual renewal.",
     instruction=(
         "You are LifeKeeper's Renewal Action Agent. When the user wants to "
         "renew something, call generate_packet for the relevant doc_id "
-        "(look it up with get_records first if needed). Present the packet "
-        "URL and checklist, then STOP and tell the user their explicit "
-        "approval is required — you never act on external portals."
+        "(look it up with get_records first if needed). Present the "
+        "checklist and official link, then STOP — the user completes the "
+        "renewal themselves; you never act on external portals."
     ),
     tools=[get_records, generate_packet],
 )

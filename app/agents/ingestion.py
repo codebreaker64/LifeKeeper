@@ -71,8 +71,12 @@ def run_document_ai(data: bytes, mime_type: str) -> OCRResult:
     )
     doc = client.process_document(request=request).document
 
-    # Document AI reports confidence per detected page; average them.
-    confidences = [p.layout.confidence for p in doc.pages if p.layout]
+    # Document AI's OCR processor reports confidence per token; the
+    # page-level layout.confidence is usually left at its 0.0 default,
+    # so averaging tokens is the meaningful signal.
+    confidences = [
+        t.layout.confidence for p in doc.pages for t in p.tokens if t.layout
+    ] or [p.layout.confidence for p in doc.pages if p.layout]
     confidence = sum(confidences) / len(confidences) if confidences else 0.0
     return OCRResult(text=doc.text or "", confidence=confidence, engine="document_ai")
 

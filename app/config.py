@@ -22,7 +22,6 @@ class Settings(BaseSettings):
     # --- Secrets (injected from Secret Manager at runtime — see deploy.sh) ---
     telegram_bot_token: str
     docai_processor_id: str             # Document OCR processor
-    gcs_bucket_name: str
     gemini_api_key: str = ""            # empty => use Vertex AI ADC instead
 
     # --- Behavioural knobs ---
@@ -31,13 +30,18 @@ class Settings(BaseSettings):
     allowed_mime_types: frozenset = frozenset(
         {"application/pdf", "image/jpeg", "image/png"}
     )
-    signed_url_days: int = 7            # renewal packet link validity
 
     # --- Internal auth for the scheduler trigger endpoint ---
     # Cloud Scheduler calls POST /tasks/run-scheduler with this shared token.
+    # The same token guards the /mcp/tools/* endpoints (X-API-Token header).
     # (OIDC is the production-grade option; a token keeps the MVP simple and
     # still prevents random internet traffic from firing notifications.)
     scheduler_token: str = "change-me"
+
+    # Telegram's official webhook auth: setWebhook(secret_token=...) makes
+    # Telegram send X-Telegram-Bot-Api-Secret-Token on every update. Empty =>
+    # rely on the unguessable hash-in-path alone (local dev without ngrok config).
+    telegram_webhook_secret: str = ""
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

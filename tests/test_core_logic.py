@@ -10,7 +10,11 @@ These cover the two invariants the whole system depends on:
 from datetime import datetime, timedelta, timezone
 
 from app.agents.extraction import compute_next_check_at
-from app.agents.scheduler import check_tier_crossing, compute_tier
+from app.agents.scheduler import (
+    _advance_next_check_at,
+    check_tier_crossing,
+    compute_tier,
+)
 
 
 def _days(n: int) -> datetime:
@@ -67,3 +71,15 @@ def test_next_check_is_next_boundary_ahead():
 def test_expired_document_checks_immediately():
     nxt = compute_next_check_at(_days(-10), "passport")
     assert nxt <= datetime.now(timezone.utc) + timedelta(seconds=5)
+
+
+# --------------------------------------------------- _advance_next_check_at
+
+def test_advance_walks_the_tier_boundaries():
+    expiry = _days(200)
+    record = {"doc_type": "passport", "expiry_date": expiry}
+    assert _advance_next_check_at(record, None) == expiry - timedelta(days=90)
+    assert _advance_next_check_at(record, "early_warning") == expiry - timedelta(days=30)
+    assert _advance_next_check_at(record, "final_reminder") == expiry
+    # overdue is terminal — parked far in the future, never re-queried
+    assert _advance_next_check_at(record, "overdue") > _days(3000)

@@ -4,7 +4,7 @@
 
 *Kaggle × Google AI Agents Capstone · Track: Concierge Agents / Agents for Good*
 
-**Status:** built for the capstone in July 2026. There is no public bot to message; to try LifeKeeper, deploy your own copy with `deploy.sh` (see [Setup](#setup)).
+**Status:** built for the capstone in July 2026 and no longer deployed, so there is no live bot to message. To try LifeKeeper, deploy your own copy with `deploy.sh` (see [Setup](#setup)).
 
 **One-liner:** A four-agent pipeline that ingests life documents via Telegram, extracts renewal deadlines with Google Document AI, stores them in long-term Firestore memory, and proactively initiates renewal flows — with human-in-the-loop safety gates on every action.
 
@@ -200,7 +200,7 @@ The design doc we started from is not the system we shipped. The honest diffs:
 LifeKeeper was built by a team of two for the Kaggle × Google AI Agents Capstone.
 
 - **Fong Kai Jie** ([@codebreaker64](https://github.com/codebreaker64)): built the MVP, then led the second iteration: redesigned the renewal packet around `.ics` calendar files and renewed/snooze/stop lifecycle buttons, added country-aware renewal playbooks, Telegram command menus and webhook `secret_token` auth, and wrote the test suite (webhook, extraction, guardrails, renewal packet and Firestore-emulator integration tests).
-- **mobins-source** ([@mobins-source](https://github.com/mobins-source)): assembled and pushed the first full four-agent pipeline (Document AI ingestion, Gemini extraction, Firestore memory, scheduler, ADK agents and `deploy.sh`).
+- **Mobin** ([@mobins-source](https://github.com/mobins-source)): assembled and pushed the first full four-agent pipeline (Document AI ingestion, Gemini extraction, Firestore memory, scheduler, ADK agents and `deploy.sh`).
 
 ## Limitations & Roadmap
 

@@ -8,11 +8,10 @@
 
 ## Demo
 
-[![LifeKeeper demo video (3:46)](media/demo-thumbnail.png)](media/demo.mp4)
 
-*3:46 walkthrough: why agents, the four-agent architecture, a live Telegram run (OCR, duplicate detection, tier-crossing reminders, renewal packet) and the one-script deploy. Click the image to open the video.*
 
-**One-liner:** A four-agent pipeline that ingests life documents via Telegram, extracts renewal deadlines with Google Document AI, stores them in long-term Firestore memory, and proactively initiates renewal flows — with human-in-the-loop safety gates on every action.
+https://github.com/user-attachments/assets/8bb2aa4e-3ee8-42cf-8cb5-427cad67fc25
+
 
 ---
 

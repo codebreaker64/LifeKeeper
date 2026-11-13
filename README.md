@@ -6,6 +6,12 @@
 
 **Status:** built for the capstone in July 2026 and no longer deployed, so there is no live bot to message. To try LifeKeeper, deploy your own copy with `deploy.sh` (see [Setup](#setup)).
 
+## Demo
+
+[![LifeKeeper demo video (3:46)](media/demo-thumbnail.png)](media/demo.mp4)
+
+*3:46 walkthrough: why agents, the four-agent architecture, a live Telegram run (OCR, duplicate detection, tier-crossing reminders, renewal packet) and the one-script deploy. Click the image to open the video.*
+
 **One-liner:** A four-agent pipeline that ingests life documents via Telegram, extracts renewal deadlines with Google Document AI, stores them in long-term Firestore memory, and proactively initiates renewal flows — with human-in-the-loop safety gates on every action.
 
 ---
